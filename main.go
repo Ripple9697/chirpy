@@ -1,37 +1,50 @@
 package main
 
 import (
-	"io"
+	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 )
+
+type apiConfig struct {
+	fileserverHits atomic.Int32
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		//log.Printf("%s %s", r.Method, r.URL.Path)
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	cfg.fileserverHits.Store(0)
+	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(http.StatusText(http.StatusOK)))
+}
+
+func (cfg *apiConfig) handlerPrint(w http.ResponseWriter, r *http.Request) {
+	count := cfg.fileserverHits.Load()
+	w.Header().Add("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write(fmt.Appendf(nil, "<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", count))
+}
 
 func main() {
 	const filepathRoot = "."
 	const port = "8080"
+
+	conf := apiConfig{}
+
+	fileServ := http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))
 	mux := http.NewServeMux()
-
-	mux.Handle("/app/", http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
-	// test of thign
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
-		// Before any call to WriteHeader or Write, declare
-		// the trailers you will set during the HTTP
-		// response. These three headers are actually sent in
-		// the trailer.
-		w.Header().Set("Trailer", "AtEnd1, AtEnd2")
-		w.Header().Add("Trailer", "AtEnd3")
-
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8") // normal header
-		w.WriteHeader(http.StatusOK)
-
-		w.Header().Set("AtEnd1", "value 1")
-		//w.Write("OK")
-		//io.WriteString(w, "This HTTP response has both headers before this text and trailers at the end.\n")
-		io.WriteString(w, "OK")
-		w.Header().Set("AtEnd2", "value 2")
-		w.Header().Set("AtEnd3", "value 3") // These will appear as trailers.
-	})
-	// thingy
+	mux.Handle("/app/", conf.middlewareMetricsInc(fileServ))
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+	mux.HandleFunc("GET /admin/metrics", conf.handlerPrint)
+	mux.HandleFunc("POST /admin/reset", conf.handlerReset)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -40,4 +53,10 @@ func main() {
 
 	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
 	log.Fatal(srv.ListenAndServe())
+}
+
+func handlerReadiness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(http.StatusText(http.StatusOK)))
 }
