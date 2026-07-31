@@ -1,19 +1,39 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Ripple9697/chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+
 	_ "github.com/lib/pq"
 )
+
+type UserResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+type ChirpResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -30,9 +50,11 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
-	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(http.StatusText(http.StatusOK)))
+	err := cfg.db.DeleteUsers(context.Background())
+	if err != nil {
+		log.Printf("Couldent Delete: %S", err)
+	}
+	respondWithJSON(w, http.StatusOK, "")
 }
 
 func (cfg *apiConfig) handlerPrint(w http.ResponseWriter, r *http.Request) {
@@ -52,18 +74,19 @@ func main() {
 		log.Fatalf("Error connecting to db; %d", err)
 	}
 
-	conf := apiConfig{
+	cfg := apiConfig{
 		fileserverHits: atomic.Int32{},
 		db:             database.New(db),
 	}
 
 	fileServ := http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))
 	mux := http.NewServeMux()
-	mux.Handle("/app/", conf.middlewareMetricsInc(fileServ))
+	mux.Handle("/app/", cfg.middlewareMetricsInc(fileServ))
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
-	mux.HandleFunc("GET /admin/metrics", conf.handlerPrint)
-	mux.HandleFunc("POST /admin/reset", conf.handlerReset)
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidate)
+	mux.HandleFunc("GET /admin/metrics", cfg.handlerPrint)
+	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
+	mux.HandleFunc("POST /api/users", cfg.handlerUserCreate)
+	mux.HandleFunc("POST /api/chirps", cfg.handlerChirpCreate)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -80,47 +103,75 @@ func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(http.StatusText(http.StatusOK)))
 }
 
-func handlerValidate(w http.ResponseWriter, r *http.Request) {
-	blacklist := map[string]struct{}{
-		"kerfuffle": {},
-		"sharbert":  {},
-		"fornax":    {},
+func (cfg *apiConfig) handlerUserCreate(w http.ResponseWriter, r *http.Request) {
+	type requestEmail struct {
+		Email string `json:"email"`
 	}
-	type Req struct {
-		Body string `json:"body"`
-	}
-	type validResp struct {
-		Valid bool `json:"valid"`
-	}
-	type CleanedResp struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	respReq := Req{}
-
-	err := json.NewDecoder(r.Body).Decode(&respReq)
+	reqEmail := requestEmail{}
+	err := json.NewDecoder(r.Body).Decode(&reqEmail)
 	if err != nil {
 		log.Printf("Error decoding parameters %s", err)
-		//w.WriteHeader(500)
 		respondWithError(w, 500, fmt.Sprintf("Error decoding parameters %s", err))
 		return
 	}
-	if len(respReq.Body) > 140 {
-		respondWithError(w, 400, "Chirp is too long")
-		return
+
+	dbUser, err := cfg.db.CreateUser(context.Background(), reqEmail.Email)
+	createdUser := UserResponse{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
 	}
-	words := strings.Split(respReq.Body, " ")
-	for i := range words {
-		_, banned := blacklist[strings.ToLower(words[i])]
-		if banned {
-			words[i] = "****"
-		}
+	if err != nil {
+		log.Printf("Failed to CreateUser: %s", err)
 	}
-	finalString := strings.Join(words, " ")
-	fmt.Println(words)
-	respondWithJSON(w, 200, CleanedResp{CleanedBody: finalString})
+	respondWithJSON(w, 201, createdUser)
 }
 
+func (cfg *apiConfig) handlerChirpCreate(w http.ResponseWriter, r *http.Request) {
+	type chirp struct {
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
+	}
+	reqChirp := chirp{}
+	err := json.NewDecoder(r.Body).Decode(&reqChirp)
+	if err != nil {
+		log.Printf("Error decoding parameters %s", err)
+		respondWithError(w, 500, fmt.Sprintf("Error decoding parameters %s", err))
+		return
+	}
+	cleanBody, err := cleanChirp(reqChirp.Body)
+	if err != nil {
+		log.Printf("failed to clean string: %s", err)
+		respondWithError(w, 401, "failed to clean string")
+		return
+	}
+	user, err := uuid.Parse(reqChirp.UserID)
+	if err != nil {
+		log.Printf("failed to parse UserID: %s", err)
+		respondWithError(w, 401, "failed to parse UserID")
+		return
+	}
+	dbChirp, err := cfg.db.CreateChirp(context.Background(), database.CreateChirpParams{
+		Body:   cleanBody,
+		UserID: user,
+	})
+	if err != nil {
+		log.Printf("failed to Create Chirp: %s", err)
+		respondWithError(w, 401, "failed to create Chirp")
+		return
+	}
+	valid := ChirpResponse{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+	respondWithJSON(w, 201, valid)
+}
+
+// tools
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	type errResp struct {
 		Error string `json:"error"`
@@ -138,4 +189,25 @@ func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Add("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(data)
+}
+
+func cleanChirp(body string) (string, error) {
+	blacklist := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	if len(body) > 140 {
+		return "", errors.New("Body to long")
+	}
+	words := strings.Split(body, " ")
+	for i := range words {
+		_, banned := blacklist[strings.ToLower(words[i])]
+		if banned {
+			words[i] = "****"
+		}
+	}
+	finalBody := strings.Join(words, " ")
+	return finalBody, nil
 }
