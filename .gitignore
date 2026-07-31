@@ -1,1 +1,6 @@
 out
+.env
+chirpy
+docker-compose.yml
+usefulcrap.txt
+
