@@ -87,6 +87,8 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
 	mux.HandleFunc("POST /api/users", cfg.handlerUserCreate)
 	mux.HandleFunc("POST /api/chirps", cfg.handlerChirpCreate)
+	mux.HandleFunc("GET /api/chirps", cfg.handlerGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.handlerGetChirp)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -169,6 +171,49 @@ func (cfg *apiConfig) handlerChirpCreate(w http.ResponseWriter, r *http.Request)
 		UserID:    dbChirp.UserID,
 	}
 	respondWithJSON(w, 201, valid)
+}
+
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.db.GetChirps(context.Background())
+	if err != nil {
+		log.Printf("failed to read DB: %s", err)
+		respondWithError(w, 500, "failed to read DB")
+		return
+	}
+	chirps := make([]ChirpResponse, len(dbChirps))
+	for i, c := range dbChirps {
+		chirps[i] = ChirpResponse{
+			ID:        c.ID,
+			CreatedAt: c.CreatedAt,
+			UpdatedAt: c.UpdatedAt,
+			Body:      c.Body,
+			UserID:    c.UserID,
+		}
+	}
+	respondWithJSON(w, 200, chirps)
+}
+
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		log.Printf("failed to parse UserID: %s", err)
+		respondWithError(w, 401, "failed to parse UserID")
+		return
+	}
+	chirp, err := cfg.db.GetChirp(context.Background(), chirpID)
+	if err != nil {
+		log.Printf("failed to read DB: %s", err)
+		respondWithError(w, http.StatusNotFound, "failed to read DB")
+		return
+	}
+	respChirp := ChirpResponse{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+	respondWithJSON(w, 200, respChirp)
 }
 
 // tools
