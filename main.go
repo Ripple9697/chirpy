@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Ripple9697/chirpy/internal/auth"
 	"github.com/Ripple9697/chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -33,6 +34,11 @@ type ChirpResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Body      string    `json:"body"`
 	UserID    uuid.UUID `json:"user_id"`
+}
+
+type RequestEmail struct {
+	Password string `json:"password"`
+	Email    string `json:"email"`
 }
 
 type apiConfig struct {
@@ -89,6 +95,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", cfg.handlerChirpCreate)
 	mux.HandleFunc("GET /api/chirps", cfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.handlerGetChirp)
+	mux.HandleFunc("POST /api/login", cfg.handlerUserLogin)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -106,28 +113,61 @@ func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerUserCreate(w http.ResponseWriter, r *http.Request) {
-	type requestEmail struct {
-		Email string `json:"email"`
-	}
-	reqEmail := requestEmail{}
+	reqEmail := RequestEmail{}
 	err := json.NewDecoder(r.Body).Decode(&reqEmail)
 	if err != nil {
 		log.Printf("Error decoding parameters %s", err)
 		respondWithError(w, 500, fmt.Sprintf("Error decoding parameters %s", err))
 		return
 	}
+	hashed, err := auth.HashPassword(reqEmail.Password)
+	if err != nil {
+		log.Printf("Error decoding parameters %s", err)
+		respondWithError(w, 500, fmt.Sprintf("Error decoding parameters %s", err))
+		return
+	}
 
-	dbUser, err := cfg.db.CreateUser(context.Background(), reqEmail.Email)
-	createdUser := UserResponse{
+	dbUser, err := cfg.db.CreateUser(context.Background(), database.CreateUserParams{
+		Email:          reqEmail.Email,
+		HashedPassword: hashed,
+	})
+	if err != nil {
+		log.Printf("Failed to CreateUser: %s", err)
+	}
+	respondWithJSON(w, 201, UserResponse{
 		ID:        dbUser.ID,
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
-	}
+	})
+}
+
+func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
+	reqEmail := RequestEmail{}
+	err := json.NewDecoder(r.Body).Decode(&reqEmail)
 	if err != nil {
-		log.Printf("Failed to CreateUser: %s", err)
+		log.Printf("Error decoding parameters %s", err)
+		respondWithError(w, 401, "Incorrect email or password")
+		return
 	}
-	respondWithJSON(w, 201, createdUser)
+	user, err := cfg.db.GetUser(context.Background(), reqEmail.Email)
+	if err != nil {
+		log.Printf("Error getting user by email %s", err)
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+	t, err := auth.CheckPasswordHash(reqEmail.Password, user.HashedPassword)
+	if !t {
+		log.Printf("Hash mismatch %s", err)
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+	respondWithJSON(w, 200, UserResponse{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
 }
 
 func (cfg *apiConfig) handlerChirpCreate(w http.ResponseWriter, r *http.Request) {
