@@ -126,13 +126,14 @@ func (cfg *apiConfig) handlerUserCreate(w http.ResponseWriter, r *http.Request) 
 		respondWithError(w, 500, fmt.Sprintf("Error decoding parameters %s", err))
 		return
 	}
-
 	dbUser, err := cfg.db.CreateUser(context.Background(), database.CreateUserParams{
 		Email:          reqEmail.Email,
 		HashedPassword: hashed,
 	})
 	if err != nil {
 		log.Printf("Failed to CreateUser: %s", err)
+		respondWithError(w, 500, "Failed to Create user")
+		return
 	}
 	respondWithJSON(w, 201, UserResponse{
 		ID:        dbUser.ID,
