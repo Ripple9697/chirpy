@@ -1,6 +1,11 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/alexedwards/argon2id"
@@ -52,4 +57,42 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	}
 
 	return id, nil
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	authString := headers.Get("Authorization")
+	if len(authString) <= 7 {
+		return "", errors.New("no jwt in authorization header")
+	}
+	token, ok := strings.CutPrefix(authString, "Bearer ")
+	if !ok {
+		return "", errors.New("couldent cutPrefix")
+	}
+	if token == "" {
+		return "", errors.New("no jwt in authorization header")
+	}
+
+	return token, nil
+}
+
+func MakeRefreshToken() string {
+	key := make([]byte, 32)
+	rand.Read(key)
+	return hex.EncodeToString(key)
+}
+
+func GetAPIKey(headers http.Header) (string, error) { // untested
+	authString := headers.Get("Authorization")
+	if len(authString) <= 7 {
+		return "", errors.New("no jwt in authorization header")
+	}
+	token, ok := strings.CutPrefix(authString, "ApiKey ")
+	if !ok {
+		return "", errors.New("couldent cutPrefix")
+	}
+	if token == "" {
+		return "", errors.New("no jwt in authorization header")
+	}
+
+	return token, nil
 }

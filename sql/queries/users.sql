@@ -15,3 +15,14 @@ DELETE FROM users;
 -- name: GetUser :one
 SELECT * from users
 where email = $1;
+
+-- name: UpdateUserCreds :one
+UPDATE users
+set email = $2,hashed_password = $3
+  where id = $1
+  RETURNING *;
+
+-- name: UpgradeUserChirpyRed :exec
+UPDATE users
+  SET is_chirpy_red = TRUE
+  WHERE id = $1;
